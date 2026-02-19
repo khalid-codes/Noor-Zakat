@@ -60,7 +60,18 @@ function App() {
   const fetchRates = async () => {
     try {
       const response = await axios.get(`${API}/rates/current`);
-      setRates(response.data);
+      const data = response.data;
+      const isValidRates =
+        data &&
+        typeof data.gold_24k_per_gram === "number" &&
+        typeof data.gold_22k_per_gram === "number" &&
+        typeof data.silver_per_gram === "number";
+
+      if (!isValidRates) {
+        throw new Error("Invalid rates payload from backend");
+      }
+
+      setRates(data);
       setLoading(false);
     } catch (error) {
       console.error("Error fetching rates:", error);
@@ -130,7 +141,10 @@ function App() {
       </header>
 
       {/* Live Rates Ticker */}
-      {rates && (
+      {rates &&
+        typeof rates.gold_24k_per_gram === "number" &&
+        typeof rates.gold_22k_per_gram === "number" &&
+        typeof rates.silver_per_gram === "number" && (
         <div className="bg-white border-b border-stone-200 py-3 px-4 shadow-sm">
           <div className="container mx-auto max-w-7xl">
             <div className="flex flex-wrap items-center justify-center gap-6 text-sm">
