@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: zakatdost-backend
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GOLD_API_KEY
+        sync: false
+      - key: MONGO_URL
+        value: ""
+      - key: DB_NAME
+        value: zakat
+      - key: CORS_ORIGINS
+        sync: false
+
+  - type: static
+    name: zakatdost-frontend
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: build
+    pullRequestPreviewsEnabled: false
+    envVars:
+      - key: REACT_APP_BACKEND_URL
+        sync: false

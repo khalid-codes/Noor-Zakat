@@ -1,3 +1,5 @@
-certifi==2025.1.31
-setuptools==76.0.0
-wheel @ file:///usr/local/Cellar/python%403.13/3.13.2/libexec/wheel-0.45.1-py3-none-any.whl#sha256=b9235939e2096903717cb6bfc132267f8a7e46deb2ec3ef9c5e234ea301795d0
+fastapi==0.115.8
+uvicorn==0.34.0
+python-dotenv==1.0.1
+motor==3.7.0
+httpx==0.28.1

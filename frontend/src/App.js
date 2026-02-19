@@ -3,7 +3,7 @@ import "@/App.css";
 import axios from "axios";
 import { Calculator, Coins, Scale, TrendingUp, Info, ChevronDown, ChevronUp } from "lucide-react";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = (process.env.REACT_APP_BACKEND_URL || "http://localhost:5055").replace(/\/$/, "");
 const API = `${BACKEND_URL}/api`;
 
 function App() {
@@ -566,7 +566,7 @@ function App() {
 
           <div className="social-links">
             <a
-              href="https://www.linkedin.com/in/YOUR-LINKEDIN"
+              href="https://www.linkedin.com/in/mohdkhalid17/"
               target="_blank"
               rel="noopener noreferrer"
             >
@@ -574,7 +574,7 @@ function App() {
             </a>
 
             <a
-              href="https://github.com/YOUR-GITHUB"
+              href="https://github.com/khalid-codes"
               target="_blank"
               rel="noopener noreferrer"
             >

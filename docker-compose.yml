@@ -1,0 +1,26 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: zakat-backend
+    environment:
+      MONGO_URL: ${MONGO_URL:-}
+      DB_NAME: ${DB_NAME:-zakat}
+      GOLD_API_KEY: ${GOLD_API_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      PORT: 8000
+    ports:
+      - "${BACKEND_PORT:-5055}:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-http://localhost:5055}
+    container_name: zakat-frontend
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    restart: unless-stopped

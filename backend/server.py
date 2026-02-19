@@ -6,22 +6,13 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import Optional, Dict
-from datetime import datetime, timezone, timedelta
+from typing import Dict
+from datetime import datetime, timezone
 import httpx
 import asyncio
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
-
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
-
-# Create the main app
-app = FastAPI(title="Zakat Calculator API")
-api_router = APIRouter(prefix="/api")
 
 # Configure logging
 logging.basicConfig(
@@ -30,12 +21,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# MongoDB connection (optional for this service)
+mongo_url = os.environ.get("MONGO_URL")
+db_name = os.environ.get("DB_NAME", "zakat")
+client = None
+db = None
+if mongo_url:
+    client = AsyncIOMotorClient(mongo_url)
+    db = client[db_name]
+else:
+    logger.warning("MONGO_URL not set. Starting without database connection.")
+
+# Create the main app
+app = FastAPI(title="Zakat Calculator API")
+api_router = APIRouter(prefix="/api")
+
 # In-memory cache for rates
 rate_cache = {
     "data": None,
     "timestamp": None,
     "ttl_seconds": 300  # 5 minutes cache
 }
+
+DEFAULT_GOLD_24K_PER_GRAM = 6500.0
+DEFAULT_SILVER_PER_GRAM = 82.0
+OZ_TO_GRAMS = 31.1035
 
 # Pydantic Models
 class AssetInputs(BaseModel):
@@ -90,6 +100,24 @@ class ZakatCalculationResponse(BaseModel):
     asset_breakdown: Dict[str, float]
 
 # Service Functions
+def _build_rates_from_defaults(now: datetime, source: str) -> GoldSilverRates:
+    """Build fallback rates when live market data is unavailable."""
+    return GoldSilverRates(
+        gold_24k_per_gram=DEFAULT_GOLD_24K_PER_GRAM,
+        gold_22k_per_gram=round(DEFAULT_GOLD_24K_PER_GRAM * 0.916, 2),
+        gold_18k_per_gram=round(DEFAULT_GOLD_24K_PER_GRAM * 0.75, 2),
+        silver_per_gram=DEFAULT_SILVER_PER_GRAM,
+        timestamp=now,
+        source=source,
+    )
+
+def _extract_per_gram_price(payload: dict, metal_code: str) -> float:
+    """Extract per-gram metal price from API response with validation."""
+    price_per_oz = payload.get("price")
+    if not isinstance(price_per_oz, (int, float)) or price_per_oz <= 0:
+        raise ValueError(f"Invalid {metal_code} price payload: {payload}")
+    return price_per_oz / OZ_TO_GRAMS
+
 async def fetch_gold_silver_rates() -> GoldSilverRates:
     """Fetch live gold and silver rates with caching"""
     # Check cache
@@ -104,71 +132,61 @@ async def fetch_gold_silver_rates() -> GoldSilverRates:
     if not api_key:
         # Return mock data if no API key
         logger.warning("No API key found, using mock data")
-        return GoldSilverRates(
-            gold_24k_per_gram=6500.0,
-            gold_22k_per_gram=5950.0,
-            gold_18k_per_gram=4875.0,
-            silver_per_gram=82.0,
-            timestamp=now,
-            source="mock_data"
-        )
+        return _build_rates_from_defaults(now, source="mock_data")
     
     try:
         async with httpx.AsyncClient(timeout=10.0) as http_client:
-            # Try GoldAPI.io format
             headers = {"x-access-token": api_key}
-            response = await http_client.get(
-                "https://www.goldapi.io/api/XAU/INR",
-                headers=headers
+            retries = 3
+            gold_payload = None
+            silver_payload = None
+
+            for attempt in range(1, retries + 1):
+                try:
+                    gold_task = http_client.get("https://www.goldapi.io/api/XAU/INR", headers=headers)
+                    silver_task = http_client.get("https://www.goldapi.io/api/XAG/INR", headers=headers)
+                    gold_response, silver_response = await asyncio.gather(gold_task, silver_task)
+
+                    gold_response.raise_for_status()
+                    silver_response.raise_for_status()
+
+                    gold_payload = gold_response.json()
+                    silver_payload = silver_response.json()
+                    break
+                except (httpx.HTTPError, ValueError):
+                    if attempt < retries:
+                        # Short exponential backoff for transient network/API failures
+                        await asyncio.sleep(0.5 * attempt)
+                    else:
+                        raise
+
+            gold_24k_per_gram = _extract_per_gram_price(gold_payload, "XAU")
+            silver_per_gram = _extract_per_gram_price(silver_payload, "XAG")
+
+            rates = GoldSilverRates(
+                gold_24k_per_gram=round(gold_24k_per_gram, 2),
+                gold_22k_per_gram=round(gold_24k_per_gram * 0.916, 2),  # 22K is 91.6% pure
+                gold_18k_per_gram=round(gold_24k_per_gram * 0.75, 2),   # 18K is 75% pure
+                silver_per_gram=round(silver_per_gram, 2),
+                timestamp=now,
+                source="goldapi.io"
             )
-            
-            if response.status_code == 200:
-                data = response.json()
-                # GoldAPI returns price per troy ounce, convert to grams
-                gold_24k_per_oz = data.get('price', 0)
-                gold_24k_per_gram = gold_24k_per_oz / 31.1035
-                
-                # Get silver rate
-                silver_response = await http_client.get(
-                    "https://www.goldapi.io/api/XAG/INR",
-                    headers=headers
-                )
-                silver_per_gram = 82.0  # default
-                if silver_response.status_code == 200:
-                    silver_data = silver_response.json()
-                    silver_per_oz = silver_data.get('price', 0)
-                    silver_per_gram = silver_per_oz / 31.1035
-                
-                rates = GoldSilverRates(
-                    gold_24k_per_gram=round(gold_24k_per_gram, 2),
-                    gold_22k_per_gram=round(gold_24k_per_gram * 0.916, 2),  # 22K is 91.6% pure
-                    gold_18k_per_gram=round(gold_24k_per_gram * 0.75, 2),   # 18K is 75% pure
-                    silver_per_gram=round(silver_per_gram, 2),
-                    timestamp=now,
-                    source="goldapi.io"
-                )
-                
-                # Cache the rates
-                rate_cache["data"] = rates
-                rate_cache["timestamp"] = now
-                
-                logger.info(f"Fetched live rates: Gold 24K = ₹{rates.gold_24k_per_gram}/g")
-                return rates
-            else:
-                logger.warning(f"API returned status {response.status_code}, using fallback")
-                raise HTTPException(status_code=503, detail="Unable to fetch live rates")
+
+            # Cache the rates
+            rate_cache["data"] = rates
+            rate_cache["timestamp"] = now
+
+            logger.info(f"Fetched live rates: Gold 24K = ₹{rates.gold_24k_per_gram}/g")
+            return rates
     
     except Exception as e:
         logger.error(f"Error fetching rates: {str(e)}")
-        # Return reasonable fallback rates
-        return GoldSilverRates(
-            gold_24k_per_gram=6500.0,
-            gold_22k_per_gram=5950.0,
-            gold_18k_per_gram=4875.0,
-            silver_per_gram=82.0,
-            timestamp=now,
-            source="fallback_data"
-        )
+        # If live fetch fails, prefer stale cache over static defaults.
+        if rate_cache["data"]:
+            stale_age = (now - rate_cache["timestamp"]).total_seconds() if rate_cache["timestamp"] else None
+            logger.warning(f"Using stale cached rates. cache_age_seconds={stale_age}")
+            return rate_cache["data"]
+        return _build_rates_from_defaults(now, source="fallback_data")
 
 def calculate_zakat(request: ZakatCalculationRequest, rates: GoldSilverRates) -> ZakatCalculationResponse:
     """Calculate Zakat according to Hanafi jurisprudence"""
@@ -308,8 +326,11 @@ app.add_middleware(
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
-    import os
+    if client is not None:
+        client.close()
 
 port = int(os.environ.get("PORT", 5000))
-app.run(host="0.0.0.0", port=port)
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=port)
