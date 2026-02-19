@@ -48,15 +48,6 @@ function App() {
     fetchNisabThresholds();
   }, []);
 
-  // Calculate Zakat whenever inputs change
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      calculateZakat();
-    }, 500); // Debounce calculation
-
-    return () => clearTimeout(timer);
-  }, [calculateZakat]);
-
   const fetchRates = async () => {
     try {
       const response = await axios.get(`${API}/rates/current`);
@@ -100,6 +91,15 @@ function App() {
       console.error("Error calculating Zakat:", error);
     }
   }, [assets, liabilities, nisabBasis]);
+
+  // Calculate Zakat whenever inputs change
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      calculateZakat();
+    }, 500); // Debounce calculation
+
+    return () => clearTimeout(timer);
+  }, [calculateZakat]);
 
   const handleAssetChange = (field, value) => {
     setAssets(prev => ({
