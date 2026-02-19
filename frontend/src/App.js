@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import "@/App.css";
 import axios from "axios";
 import { Calculator, Coins, Scale, TrendingUp, Info, ChevronDown, ChevronUp } from "lucide-react";
@@ -55,7 +55,7 @@ function App() {
     }, 500); // Debounce calculation
 
     return () => clearTimeout(timer);
-  }, [assets, liabilities, nisabBasis]);
+  }, [calculateZakat]);
 
   const fetchRates = async () => {
     try {
@@ -77,7 +77,7 @@ function App() {
     }
   };
 
-  const calculateZakat = async () => {
+  const calculateZakat = useCallback(async () => {
     try {
       const response = await axios.post(`${API}/zakat/calculate`, {
         assets,
@@ -88,7 +88,7 @@ function App() {
     } catch (error) {
       console.error("Error calculating Zakat:", error);
     }
-  };
+  }, [assets, liabilities, nisabBasis]);
 
   const handleAssetChange = (field, value) => {
     setAssets(prev => ({
