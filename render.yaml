@@ -18,10 +18,14 @@ services:
 
   - type: static
     name: zakatdost-frontend
+    runtime: static
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: build
     pullRequestPreviewsEnabled: false
     envVars:
       - key: REACT_APP_BACKEND_URL
-        sync: false
+        fromService:
+          type: web
+          name: zakatdost-backend
+          envVarKey: RENDER_EXTERNAL_URL
