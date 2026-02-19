@@ -2,6 +2,10 @@
 
 Noor Zakat Calculator is a full-stack web app to calculate Zakat using live gold/silver rates (INR), with Nisab threshold support for both gold and silver basis.
 
+## Live Demo
+
+- Frontend: https://zakatnoor.netlify.app/
+
 ## Features
 
 - Live gold and silver rates (with cache and fallback)
