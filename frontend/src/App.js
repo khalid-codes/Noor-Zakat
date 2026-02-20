@@ -183,9 +183,14 @@ function App() {
             <div className="flex flex-wrap items-center justify-center gap-6 text-sm">
               <div className="flex items-center gap-2">
                 <TrendingUp className="w-4 h-4 text-amber-600" />
-                <span className="font-semibold text-stone-600">Live Rates:</span>
+                <span className="font-semibold text-stone-600">
+                  {rates.source === "goldapi.io" ? "Live Rates:" : "Estimated Rates:"}
+                </span>
                 {ratesStatus === "stale" && (
                   <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Offline cached</span>
+                )}
+                {rates.source !== "goldapi.io" && (
+                  <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Fallback</span>
                 )}
               </div>
               <div className="gold-badge" data-testid="rate-gold-24k">

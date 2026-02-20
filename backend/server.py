@@ -112,11 +112,37 @@ def _build_rates_from_defaults(now: datetime, source: str) -> GoldSilverRates:
     )
 
 def _extract_per_gram_price(payload: dict, metal_code: str) -> float:
-    """Extract per-gram metal price from API response with validation."""
-    price_per_oz = payload.get("price")
-    if not isinstance(price_per_oz, (int, float)) or price_per_oz <= 0:
+    """
+    Extract per-gram metal price from API response.
+    Prefer explicit per-gram fields and only fall back to unit conversion.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid {metal_code} payload type: {type(payload)}")
+
+    preferred_keys = (
+        ["price_gram_24k", "price_gram_999", "price_gram"]
+        if metal_code == "XAU"
+        else ["price_gram_999", "price_gram_925", "price_gram"]
+    )
+    for key in preferred_keys:
+        value = payload.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+
+    price = payload.get("price")
+    if not isinstance(price, (int, float)) or price <= 0:
         raise ValueError(f"Invalid {metal_code} price payload: {payload}")
-    return price_per_oz / OZ_TO_GRAMS
+
+    unit = str(payload.get("unit", "")).lower().strip()
+    if unit in {"gram", "g"}:
+        return float(price)
+    if "kilo" in unit or unit == "kg":
+        return float(price) / 1000.0
+    if "tola" in unit:
+        return float(price) / 11.6638
+
+    # Default GoldAPI interpretation: price is per troy ounce.
+    return float(price) / OZ_TO_GRAMS
 
 async def fetch_gold_silver_rates() -> GoldSilverRates:
     """Fetch live gold and silver rates with caching"""
