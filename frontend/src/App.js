@@ -5,12 +5,33 @@ import { Calculator, Coins, Scale, TrendingUp, Info, ChevronDown, ChevronUp } fr
 
 const BACKEND_URL = (process.env.REACT_APP_BACKEND_URL || "http://localhost:5055").replace(/\/$/, "");
 const API = `${BACKEND_URL}/api`;
+const RATES_CACHE_KEY = "zakat_rates_cache_v1";
+const RATES_REFRESH_MS = 60000;
+const NISAB_REFRESH_MS = 5 * 60000;
+
+const isValidRatesPayload = (data) =>
+  data &&
+  typeof data.gold_24k_per_gram === "number" &&
+  typeof data.gold_22k_per_gram === "number" &&
+  typeof data.silver_per_gram === "number";
+
+const getCachedRates = () => {
+  try {
+    const raw = localStorage.getItem(RATES_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return isValidRatesPayload(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
 
 function App() {
   // State for live rates
-  const [rates, setRates] = useState(null);
+  const [rates, setRates] = useState(() => getCachedRates());
   const [nisabThresholds, setNisabThresholds] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!rates);
+  const [ratesStatus, setRatesStatus] = useState(rates ? "stale" : "loading");
 
   // State for assets
   const [assets, setAssets] = useState({
@@ -42,42 +63,54 @@ function App() {
   // Mobile summary panel toggle
   const [showSummary, setShowSummary] = useState(false);
 
-  // Fetch live rates on mount
-  useEffect(() => {
-    fetchRates();
-    fetchNisabThresholds();
+  const fetchRates = useCallback(async () => {
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const response = await axios.get(`${API}/rates/current`, { timeout: 15000 });
+        const data = response.data;
+        if (!isValidRatesPayload(data)) {
+          throw new Error("Invalid rates payload from backend");
+        }
+        setRates(data);
+        setRatesStatus("live");
+        localStorage.setItem(RATES_CACHE_KEY, JSON.stringify(data));
+        setLoading(false);
+        return;
+      } catch (error) {
+        if (attempt === maxAttempts) {
+          console.error("Error fetching rates:", error);
+          setRatesStatus(getCachedRates() ? "stale" : "unavailable");
+          setLoading(false);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+      }
+    }
   }, []);
 
-  const fetchRates = async () => {
-    try {
-      const response = await axios.get(`${API}/rates/current`);
-      const data = response.data;
-      const isValidRates =
-        data &&
-        typeof data.gold_24k_per_gram === "number" &&
-        typeof data.gold_22k_per_gram === "number" &&
-        typeof data.silver_per_gram === "number";
-
-      if (!isValidRates) {
-        throw new Error("Invalid rates payload from backend");
-      }
-
-      setRates(data);
-      setLoading(false);
-    } catch (error) {
-      console.error("Error fetching rates:", error);
-      setLoading(false);
-    }
-  };
-
-  const fetchNisabThresholds = async () => {
+  const fetchNisabThresholds = useCallback(async () => {
     try {
       const response = await axios.get(`${API}/nisab/thresholds`);
       setNisabThresholds(response.data);
     } catch (error) {
       console.error("Error fetching Nisab thresholds:", error);
     }
-  };
+  }, []);
+
+  // Fetch live rates and nisab, then keep them fresh
+  useEffect(() => {
+    fetchRates();
+    fetchNisabThresholds();
+
+    const ratesInterval = setInterval(fetchRates, RATES_REFRESH_MS);
+    const nisabInterval = setInterval(fetchNisabThresholds, NISAB_REFRESH_MS);
+
+    return () => {
+      clearInterval(ratesInterval);
+      clearInterval(nisabInterval);
+    };
+  }, [fetchRates, fetchNisabThresholds]);
 
   const calculateZakat = useCallback(async () => {
     try {
@@ -151,6 +184,9 @@ function App() {
               <div className="flex items-center gap-2">
                 <TrendingUp className="w-4 h-4 text-amber-600" />
                 <span className="font-semibold text-stone-600">Live Rates:</span>
+                {ratesStatus === "stale" && (
+                  <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Offline cached</span>
+                )}
               </div>
               <div className="gold-badge" data-testid="rate-gold-24k">
                 <Coins className="w-4 h-4" />
@@ -166,6 +202,11 @@ function App() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+      {!rates && !loading && (
+        <div className="bg-amber-50 border-b border-amber-200 py-2 px-4 text-center text-amber-800 text-sm">
+          Live rates are temporarily unavailable. Please wait while we retry.
         </div>
       )}
 
