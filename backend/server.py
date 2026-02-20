@@ -40,6 +40,7 @@ api_router = APIRouter(prefix="/api")
 rate_cache = {
     "data": None,
     "timestamp": None,
+    "last_error": None,
     "ttl_seconds": 300  # 5 minutes cache
 }
 
@@ -144,6 +145,141 @@ def _extract_per_gram_price(payload: dict, metal_code: str) -> float:
     # Default GoldAPI interpretation: price is per troy ounce.
     return float(price) / OZ_TO_GRAMS
 
+async def _fetch_rates_from_gold_api_public(http_client: httpx.AsyncClient, now: datetime) -> GoldSilverRates:
+    """Primary provider: gold-api.com (USD/oz) + open.er-api.com (USD->INR)."""
+    gold_task = http_client.get("https://api.gold-api.com/price/XAU")
+    silver_task = http_client.get("https://api.gold-api.com/price/XAG")
+    fx_task = _fetch_usd_inr_rate(http_client)
+    gold_response, silver_response, fx_response = await asyncio.gather(gold_task, silver_task, fx_task)
+
+    gold_response.raise_for_status()
+    silver_response.raise_for_status()
+    fx_response.raise_for_status()
+
+    gold_payload = gold_response.json()
+    silver_payload = silver_response.json()
+    fx_payload = fx_response
+
+    gold_usd_per_oz = gold_payload.get("price")
+    silver_usd_per_oz = silver_payload.get("price")
+    usd_inr = fx_payload.get("rates", {}).get("INR")
+
+    if not isinstance(gold_usd_per_oz, (int, float)) or gold_usd_per_oz <= 0:
+        raise ValueError(f"Invalid XAU payload from gold-api.com: {gold_payload}")
+    if not isinstance(silver_usd_per_oz, (int, float)) or silver_usd_per_oz <= 0:
+        raise ValueError(f"Invalid XAG payload from gold-api.com: {silver_payload}")
+    if not isinstance(usd_inr, (int, float)) or usd_inr <= 0:
+        raise ValueError(f"Invalid USDINR payload from open.er-api.com: {fx_payload}")
+
+    gold_24k_per_gram = (float(gold_usd_per_oz) * float(usd_inr)) / OZ_TO_GRAMS
+    silver_per_gram = (float(silver_usd_per_oz) * float(usd_inr)) / OZ_TO_GRAMS
+
+    return GoldSilverRates(
+        gold_24k_per_gram=round(gold_24k_per_gram, 2),
+        gold_22k_per_gram=round(gold_24k_per_gram * 0.916, 2),
+        gold_18k_per_gram=round(gold_24k_per_gram * 0.75, 2),
+        silver_per_gram=round(silver_per_gram, 2),
+        timestamp=now,
+        source="gold-api.com+open.er-api.com"
+    )
+
+async def _fetch_usd_inr_rate(http_client: httpx.AsyncClient) -> dict:
+    """Fetch USD->INR with provider fallback."""
+    errors = []
+
+    try:
+        response = await http_client.get("https://open.er-api.com/v6/latest/USD")
+        response.raise_for_status()
+        payload = response.json()
+        inr = payload.get("rates", {}).get("INR")
+        if isinstance(inr, (int, float)) and inr > 0:
+            return payload
+        raise ValueError(f"Invalid open.er-api.com payload: {payload}")
+    except Exception as exc:
+        errors.append(f"open.er-api.com: {exc}")
+
+    try:
+        response = await http_client.get("https://api.frankfurter.app/latest?from=USD&to=INR")
+        response.raise_for_status()
+        payload = response.json()
+        inr = payload.get("rates", {}).get("INR")
+        if isinstance(inr, (int, float)) and inr > 0:
+            return {"rates": {"INR": inr}}
+        raise ValueError(f"Invalid frankfurter payload: {payload}")
+    except Exception as exc:
+        errors.append(f"frankfurter.app: {exc}")
+
+    raise RuntimeError("; ".join(errors))
+
+async def _fetch_rates_from_stooq(http_client: httpx.AsyncClient, now: datetime) -> GoldSilverRates:
+    """Tertiary provider: stooq USD quotes + USDINR conversion."""
+    gold_task = http_client.get("https://stooq.com/q/l/?s=xauusd&i=d")
+    silver_task = http_client.get("https://stooq.com/q/l/?s=xagusd&i=d")
+    fx_task = _fetch_usd_inr_rate(http_client)
+    gold_response, silver_response, fx_payload = await asyncio.gather(gold_task, silver_task, fx_task)
+
+    gold_response.raise_for_status()
+    silver_response.raise_for_status()
+
+    usd_inr = fx_payload.get("rates", {}).get("INR")
+    if not isinstance(usd_inr, (int, float)) or usd_inr <= 0:
+        raise ValueError(f"Invalid USDINR payload: {fx_payload}")
+
+    def parse_stooq_close(raw: str, symbol: str) -> float:
+        line = raw.strip().splitlines()[0]
+        parts = line.split(",")
+        # CSV format: SYMBOL,DATE,TIME,OPEN,HIGH,LOW,CLOSE,...
+        if len(parts) < 7:
+            raise ValueError(f"Invalid stooq format for {symbol}: {line}")
+        close_value = float(parts[6])
+        if close_value <= 0:
+            raise ValueError(f"Invalid stooq close for {symbol}: {close_value}")
+        return close_value
+
+    gold_usd_per_oz = parse_stooq_close(gold_response.text, "XAUUSD")
+    silver_usd_per_oz = parse_stooq_close(silver_response.text, "XAGUSD")
+
+    gold_24k_per_gram = (gold_usd_per_oz * float(usd_inr)) / OZ_TO_GRAMS
+    silver_per_gram = (silver_usd_per_oz * float(usd_inr)) / OZ_TO_GRAMS
+
+    return GoldSilverRates(
+        gold_24k_per_gram=round(gold_24k_per_gram, 2),
+        gold_22k_per_gram=round(gold_24k_per_gram * 0.916, 2),
+        gold_18k_per_gram=round(gold_24k_per_gram * 0.75, 2),
+        silver_per_gram=round(silver_per_gram, 2),
+        timestamp=now,
+        source="stooq+fx"
+    )
+
+async def _fetch_rates_from_goldapi_io(http_client: httpx.AsyncClient, now: datetime) -> GoldSilverRates:
+    """Secondary provider: goldapi.io (requires GOLD_API_KEY)."""
+    api_key = os.environ.get("GOLD_API_KEY")
+    if not api_key:
+        raise ValueError("GOLD_API_KEY not configured for goldapi.io provider")
+
+    headers = {"x-access-token": api_key}
+    gold_task = http_client.get("https://www.goldapi.io/api/XAU/INR", headers=headers)
+    silver_task = http_client.get("https://www.goldapi.io/api/XAG/INR", headers=headers)
+    gold_response, silver_response = await asyncio.gather(gold_task, silver_task)
+
+    gold_response.raise_for_status()
+    silver_response.raise_for_status()
+
+    gold_payload = gold_response.json()
+    silver_payload = silver_response.json()
+
+    gold_24k_per_gram = _extract_per_gram_price(gold_payload, "XAU")
+    silver_per_gram = _extract_per_gram_price(silver_payload, "XAG")
+
+    return GoldSilverRates(
+        gold_24k_per_gram=round(gold_24k_per_gram, 2),
+        gold_22k_per_gram=round(gold_24k_per_gram * 0.916, 2),  # 22K is 91.6% pure
+        gold_18k_per_gram=round(gold_24k_per_gram * 0.75, 2),   # 18K is 75% pure
+        silver_per_gram=round(silver_per_gram, 2),
+        timestamp=now,
+        source="goldapi.io"
+    )
+
 async def fetch_gold_silver_rates() -> GoldSilverRates:
     """Fetch live gold and silver rates with caching"""
     # Check cache
@@ -154,65 +290,51 @@ async def fetch_gold_silver_rates() -> GoldSilverRates:
             logger.info("Returning cached rates")
             return rate_cache["data"]
     
-    api_key = os.environ.get('GOLD_API_KEY')
-    if not api_key:
-        # Return mock data if no API key
-        logger.warning("No API key found, using mock data")
-        return _build_rates_from_defaults(now, source="mock_data")
-    
     try:
-        async with httpx.AsyncClient(timeout=10.0) as http_client:
-            headers = {"x-access-token": api_key}
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            headers={"User-Agent": "NoorZakat/1.0 (+https://zakatnoor.netlify.app)"},
+        ) as http_client:
             retries = 3
-            gold_payload = None
-            silver_payload = None
 
             for attempt in range(1, retries + 1):
                 try:
-                    gold_task = http_client.get("https://www.goldapi.io/api/XAU/INR", headers=headers)
-                    silver_task = http_client.get("https://www.goldapi.io/api/XAG/INR", headers=headers)
-                    gold_response, silver_response = await asyncio.gather(gold_task, silver_task)
+                    provider_errors = []
+                    for provider_name, provider in (
+                        ("goldapi.io", _fetch_rates_from_goldapi_io),
+                        ("gold-api.com+open.er-api.com", _fetch_rates_from_gold_api_public),
+                        ("stooq+fx", _fetch_rates_from_stooq),
+                    ):
+                        try:
+                            rates = await provider(http_client, now)
+                            rate_cache["data"] = rates
+                            rate_cache["timestamp"] = now
+                            rate_cache["last_error"] = None
+                            logger.info(
+                                f"Fetched rates from {provider_name}: Gold 24K = ₹{rates.gold_24k_per_gram}/g"
+                            )
+                            return rates
+                        except Exception as provider_error:
+                            provider_errors.append(f"{provider_name}: {provider_error}")
+                            continue
 
-                    gold_response.raise_for_status()
-                    silver_response.raise_for_status()
-
-                    gold_payload = gold_response.json()
-                    silver_payload = silver_response.json()
-                    break
-                except (httpx.HTTPError, ValueError):
+                    raise RuntimeError("; ".join(provider_errors))
+                except Exception:
                     if attempt < retries:
                         # Short exponential backoff for transient network/API failures
                         await asyncio.sleep(0.5 * attempt)
                     else:
                         raise
-
-            gold_24k_per_gram = _extract_per_gram_price(gold_payload, "XAU")
-            silver_per_gram = _extract_per_gram_price(silver_payload, "XAG")
-
-            rates = GoldSilverRates(
-                gold_24k_per_gram=round(gold_24k_per_gram, 2),
-                gold_22k_per_gram=round(gold_24k_per_gram * 0.916, 2),  # 22K is 91.6% pure
-                gold_18k_per_gram=round(gold_24k_per_gram * 0.75, 2),   # 18K is 75% pure
-                silver_per_gram=round(silver_per_gram, 2),
-                timestamp=now,
-                source="goldapi.io"
-            )
-
-            # Cache the rates
-            rate_cache["data"] = rates
-            rate_cache["timestamp"] = now
-
-            logger.info(f"Fetched live rates: Gold 24K = ₹{rates.gold_24k_per_gram}/g")
-            return rates
     
     except Exception as e:
         logger.error(f"Error fetching rates: {str(e)}")
+        rate_cache["last_error"] = str(e)
         # If live fetch fails, prefer stale cache over static defaults.
         if rate_cache["data"]:
             stale_age = (now - rate_cache["timestamp"]).total_seconds() if rate_cache["timestamp"] else None
             logger.warning(f"Using stale cached rates. cache_age_seconds={stale_age}")
             return rate_cache["data"]
-        return _build_rates_from_defaults(now, source="fallback_data")
+        return _build_rates_from_defaults(now, source="fallback_data(provider_unavailable)")
 
 def calculate_zakat(request: ZakatCalculationRequest, rates: GoldSilverRates) -> ZakatCalculationResponse:
     """Calculate Zakat according to Hanafi jurisprudence"""
