@@ -9,6 +9,7 @@ const RATES_CACHE_KEY = "zakat_rates_cache_v1";
 const RATES_REFRESH_MS = 60000;
 const NISAB_REFRESH_MS = 5 * 60000;
 const LIVE_RATE_SOURCES = new Set([
+  "ibjarates.com",
   "stooq+fx",
   "gold-api.com+open.er-api.com",
   "goldapi.io"
@@ -190,7 +191,7 @@ function App() {
               <div className="flex items-center gap-2">
                 <TrendingUp className="w-4 h-4 text-amber-600" />
                 <span className="font-semibold text-stone-600">
-                  {isLiveRatesSource ? "Global Market Rates (INR converted):" : "Estimated Rates:"}
+                  {isLiveRatesSource ? "India Benchmark Rates:" : "Estimated Rates:"}
                 </span>
                 {ratesStatus === "stale" && (
                   <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Offline cached</span>
@@ -199,7 +200,7 @@ function App() {
                   <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Fallback</span>
                 )}
                 {isLiveRatesSource && (
-                  <span className="text-xs text-stone-500">Indicative bullion pricing, not local retail jewellery rates</span>
+                  <span className="text-xs text-stone-500">IBJA benchmark bullion pricing for India</span>
                 )}
               </div>
               <div className="gold-badge" data-testid="rate-gold-24k">

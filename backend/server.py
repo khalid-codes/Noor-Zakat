@@ -10,6 +10,7 @@ from typing import Dict
 from datetime import datetime, timezone
 import httpx
 import asyncio
+import re
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -146,10 +147,48 @@ def _extract_per_gram_price(payload: dict, metal_code: str) -> float:
     return float(price) / OZ_TO_GRAMS
 
 LIVE_RATE_SOURCES = {
+    "ibjarates.com",
     "stooq+fx",
     "gold-api.com+open.er-api.com",
     "goldapi.io",
 }
+
+
+def _extract_currency_number(text: str, field_name: str) -> float:
+    match = re.search(rf'id="{field_name}"[^>]*>\s*₹?\s*([\d,]+(?:\.\d+)?)\s*<', text, re.I)
+    if not match:
+        raise ValueError(f"Could not locate field {field_name}")
+    return float(match.group(1).replace(",", ""))
+
+
+async def _fetch_rates_from_ibjarates(http_client: httpx.AsyncClient, now: datetime) -> GoldSilverRates:
+    """Primary provider: IBJA benchmark India bullion rates."""
+    response = await http_client.get("https://ibjarates.com/")
+    response.raise_for_status()
+    text = response.text
+
+    # IBJA publishes gold per 10gm and silver per 1kg.
+    gold_999_pm = _extract_currency_number(text, "lblGold999_PM")
+    gold_916_pm = _extract_currency_number(text, "lblGold916_PM")
+    gold_750_pm = _extract_currency_number(text, "lblGold750_PM")
+    silver_999_pm = _extract_currency_number(text, "lblSilver999_PM")
+
+    gold_24k_per_gram = gold_999_pm / 10.0
+    gold_22k_per_gram = gold_916_pm / 10.0
+    gold_18k_per_gram = gold_750_pm / 10.0
+    silver_per_gram = silver_999_pm / 1000.0
+
+    if min(gold_24k_per_gram, gold_22k_per_gram, gold_18k_per_gram, silver_per_gram) <= 0:
+        raise ValueError("IBJA returned non-positive rates")
+
+    return GoldSilverRates(
+        gold_24k_per_gram=round(gold_24k_per_gram, 2),
+        gold_22k_per_gram=round(gold_22k_per_gram, 2),
+        gold_18k_per_gram=round(gold_18k_per_gram, 2),
+        silver_per_gram=round(silver_per_gram, 2),
+        timestamp=now,
+        source="ibjarates.com"
+    )
 
 
 async def _fetch_rates_from_gold_api_public(http_client: httpx.AsyncClient, now: datetime) -> GoldSilverRates:
@@ -308,6 +347,7 @@ async def fetch_gold_silver_rates() -> GoldSilverRates:
                 try:
                     provider_errors = []
                     for provider_name, provider in (
+                        ("ibjarates.com", _fetch_rates_from_ibjarates),
                         ("stooq+fx", _fetch_rates_from_stooq),
                         ("gold-api.com+open.er-api.com", _fetch_rates_from_gold_api_public),
                         ("goldapi.io", _fetch_rates_from_goldapi_io),
