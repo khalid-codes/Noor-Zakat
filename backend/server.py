@@ -145,8 +145,15 @@ def _extract_per_gram_price(payload: dict, metal_code: str) -> float:
     # Default GoldAPI interpretation: price is per troy ounce.
     return float(price) / OZ_TO_GRAMS
 
+LIVE_RATE_SOURCES = {
+    "stooq+fx",
+    "gold-api.com+open.er-api.com",
+    "goldapi.io",
+}
+
+
 async def _fetch_rates_from_gold_api_public(http_client: httpx.AsyncClient, now: datetime) -> GoldSilverRates:
-    """Primary provider: gold-api.com (USD/oz) + open.er-api.com (USD->INR)."""
+    """Provider: gold-api.com (USD/oz) + open.er-api.com (USD->INR)."""
     gold_task = http_client.get("https://api.gold-api.com/price/XAU")
     silver_task = http_client.get("https://api.gold-api.com/price/XAG")
     fx_task = _fetch_usd_inr_rate(http_client)
@@ -212,7 +219,7 @@ async def _fetch_usd_inr_rate(http_client: httpx.AsyncClient) -> dict:
     raise RuntimeError("; ".join(errors))
 
 async def _fetch_rates_from_stooq(http_client: httpx.AsyncClient, now: datetime) -> GoldSilverRates:
-    """Tertiary provider: stooq USD quotes + USDINR conversion."""
+    """Provider: stooq USD quotes + USDINR conversion."""
     gold_task = http_client.get("https://stooq.com/q/l/?s=xauusd&i=d")
     silver_task = http_client.get("https://stooq.com/q/l/?s=xagusd&i=d")
     fx_task = _fetch_usd_inr_rate(http_client)
@@ -252,7 +259,7 @@ async def _fetch_rates_from_stooq(http_client: httpx.AsyncClient, now: datetime)
     )
 
 async def _fetch_rates_from_goldapi_io(http_client: httpx.AsyncClient, now: datetime) -> GoldSilverRates:
-    """Secondary provider: goldapi.io (requires GOLD_API_KEY)."""
+    """Provider: goldapi.io (requires GOLD_API_KEY)."""
     api_key = os.environ.get("GOLD_API_KEY")
     if not api_key:
         raise ValueError("GOLD_API_KEY not configured for goldapi.io provider")
@@ -301,9 +308,9 @@ async def fetch_gold_silver_rates() -> GoldSilverRates:
                 try:
                     provider_errors = []
                     for provider_name, provider in (
-                        ("goldapi.io", _fetch_rates_from_goldapi_io),
-                        ("gold-api.com+open.er-api.com", _fetch_rates_from_gold_api_public),
                         ("stooq+fx", _fetch_rates_from_stooq),
+                        ("gold-api.com+open.er-api.com", _fetch_rates_from_gold_api_public),
+                        ("goldapi.io", _fetch_rates_from_goldapi_io),
                     ):
                         try:
                             rates = await provider(http_client, now)

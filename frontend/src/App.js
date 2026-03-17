@@ -8,6 +8,11 @@ const API = `${BACKEND_URL}/api`;
 const RATES_CACHE_KEY = "zakat_rates_cache_v1";
 const RATES_REFRESH_MS = 60000;
 const NISAB_REFRESH_MS = 5 * 60000;
+const LIVE_RATE_SOURCES = new Set([
+  "stooq+fx",
+  "gold-api.com+open.er-api.com",
+  "goldapi.io"
+]);
 
 const isValidRatesPayload = (data) =>
   data &&
@@ -62,6 +67,7 @@ function App() {
 
   // Mobile summary panel toggle
   const [showSummary, setShowSummary] = useState(false);
+  const isLiveRatesSource = rates && LIVE_RATE_SOURCES.has(rates.source);
 
   const fetchRates = useCallback(async () => {
     const maxAttempts = 3;
@@ -184,12 +190,12 @@ function App() {
               <div className="flex items-center gap-2">
                 <TrendingUp className="w-4 h-4 text-amber-600" />
                 <span className="font-semibold text-stone-600">
-                  {rates.source === "goldapi.io" ? "Live Rates:" : "Estimated Rates:"}
+                  {isLiveRatesSource ? "Live Rates:" : "Estimated Rates:"}
                 </span>
                 {ratesStatus === "stale" && (
                   <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Offline cached</span>
                 )}
-                {rates.source !== "goldapi.io" && (
+                {!isLiveRatesSource && (
                   <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Fallback</span>
                 )}
               </div>
