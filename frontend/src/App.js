@@ -190,13 +190,16 @@ function App() {
               <div className="flex items-center gap-2">
                 <TrendingUp className="w-4 h-4 text-amber-600" />
                 <span className="font-semibold text-stone-600">
-                  {isLiveRatesSource ? "Live Rates:" : "Estimated Rates:"}
+                  {isLiveRatesSource ? "Global Market Rates (INR converted):" : "Estimated Rates:"}
                 </span>
                 {ratesStatus === "stale" && (
                   <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Offline cached</span>
                 )}
                 {!isLiveRatesSource && (
                   <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Fallback</span>
+                )}
+                {isLiveRatesSource && (
+                  <span className="text-xs text-stone-500">Indicative bullion pricing, not local retail jewellery rates</span>
                 )}
               </div>
               <div className="gold-badge" data-testid="rate-gold-24k">
