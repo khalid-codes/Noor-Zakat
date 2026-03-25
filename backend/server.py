@@ -5,6 +5,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 from pathlib import Path
+import json
 from pydantic import BaseModel, Field
 from typing import Dict
 from datetime import datetime, timezone
@@ -42,12 +43,13 @@ rate_cache = {
     "data": None,
     "timestamp": None,
     "last_error": None,
-    "ttl_seconds": 300  # 5 minutes cache
+    "ttl_seconds": 6 * 60 * 60  # 6 hours cache for benchmark rates
 }
 
 DEFAULT_GOLD_24K_PER_GRAM = 6500.0
 DEFAULT_SILVER_PER_GRAM = 82.0
 OZ_TO_GRAMS = 31.1035
+RATES_CACHE_FILE = ROOT_DIR / "rates_cache.json"
 
 # Pydantic Models
 class AssetInputs(BaseModel):
@@ -102,6 +104,24 @@ class ZakatCalculationResponse(BaseModel):
     asset_breakdown: Dict[str, float]
 
 # Service Functions
+def _persist_rates_to_disk(rates: GoldSilverRates) -> None:
+    """Persist the last good rates so cold starts can recover quickly."""
+    payload = rates.model_dump(mode="json")
+    RATES_CACHE_FILE.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _load_rates_from_disk() -> GoldSilverRates | None:
+    """Load the last persisted good rates if present."""
+    if not RATES_CACHE_FILE.exists():
+        return None
+    try:
+        payload = json.loads(RATES_CACHE_FILE.read_text(encoding="utf-8"))
+        return GoldSilverRates.model_validate(payload)
+    except Exception as exc:
+        logger.warning(f"Unable to load persisted rates cache: {exc}")
+        return None
+
+
 def _build_rates_from_defaults(now: datetime, source: str) -> GoldSilverRates:
     """Build fallback rates when live market data is unavailable."""
     return GoldSilverRates(
@@ -335,6 +355,12 @@ async def fetch_gold_silver_rates() -> GoldSilverRates:
         if age < rate_cache["ttl_seconds"]:
             logger.info("Returning cached rates")
             return rate_cache["data"]
+
+    persisted_rates = _load_rates_from_disk()
+    if persisted_rates and not rate_cache["data"]:
+        rate_cache["data"] = persisted_rates
+        rate_cache["timestamp"] = persisted_rates.timestamp
+        logger.info("Loaded persisted benchmark rates from disk")
     
     try:
         async with httpx.AsyncClient(
@@ -357,6 +383,7 @@ async def fetch_gold_silver_rates() -> GoldSilverRates:
                             rate_cache["data"] = rates
                             rate_cache["timestamp"] = now
                             rate_cache["last_error"] = None
+                            _persist_rates_to_disk(rates)
                             logger.info(
                                 f"Fetched rates from {provider_name}: Gold 24K = ₹{rates.gold_24k_per_gram}/g"
                             )
@@ -381,7 +408,18 @@ async def fetch_gold_silver_rates() -> GoldSilverRates:
             stale_age = (now - rate_cache["timestamp"]).total_seconds() if rate_cache["timestamp"] else None
             logger.warning(f"Using stale cached rates. cache_age_seconds={stale_age}")
             return rate_cache["data"]
+        if persisted_rates:
+            logger.warning("Using persisted benchmark rates from disk after provider failure")
+            return persisted_rates
         return _build_rates_from_defaults(now, source="fallback_data(provider_unavailable)")
+
+
+async def _warm_rates_cache() -> None:
+    """Refresh rates opportunistically in the background without blocking startup."""
+    try:
+        await fetch_gold_silver_rates()
+    except Exception as exc:
+        logger.warning(f"Background warm-up of rates cache failed: {exc}")
 
 def calculate_zakat(request: ZakatCalculationRequest, rates: GoldSilverRates) -> ZakatCalculationResponse:
     """Calculate Zakat according to Hanafi jurisprudence"""
@@ -518,6 +556,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def warm_rates_on_startup():
+    asyncio.create_task(_warm_rates_cache())
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

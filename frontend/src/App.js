@@ -6,8 +6,8 @@ import { Calculator, Coins, Scale, TrendingUp, Info, ChevronDown, ChevronUp } fr
 const BACKEND_URL = (process.env.REACT_APP_BACKEND_URL || "http://localhost:5055").replace(/\/$/, "");
 const API = `${BACKEND_URL}/api`;
 const RATES_CACHE_KEY = "zakat_rates_cache_v1";
-const RATES_REFRESH_MS = 60000;
-const NISAB_REFRESH_MS = 5 * 60000;
+const RATES_REFRESH_MS = 15 * 60000;
+const NISAB_REFRESH_MS = 30 * 60000;
 const LIVE_RATE_SOURCES = new Set([
   "ibjarates.com",
   "stooq+fx",
@@ -74,7 +74,7 @@ function App() {
     const maxAttempts = 3;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        const response = await axios.get(`${API}/rates/current`, { timeout: 15000 });
+        const response = await axios.get(`${API}/rates/current`, { timeout: 30000 });
         const data = response.data;
         if (!isValidRatesPayload(data)) {
           throw new Error("Invalid rates payload from backend");
@@ -194,13 +194,13 @@ function App() {
                   {isLiveRatesSource ? "India Benchmark Rates:" : "Estimated Rates:"}
                 </span>
                 {ratesStatus === "stale" && (
-                  <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Offline cached</span>
+                  <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Cached benchmark</span>
                 )}
                 {!isLiveRatesSource && (
                   <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">Fallback</span>
                 )}
                 {isLiveRatesSource && (
-                  <span className="text-xs text-stone-500">IBJA benchmark bullion pricing for India</span>
+                  <span className="text-xs text-stone-500">IBJA benchmark bullion pricing for India, updated on AM/PM cycles</span>
                 )}
               </div>
               <div className="gold-badge" data-testid="rate-gold-24k">
