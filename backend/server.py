@@ -29,7 +29,12 @@ db_name = os.environ.get("DB_NAME", "zakat")
 client = None
 db = None
 if mongo_url:
-    client = AsyncIOMotorClient(mongo_url)
+    client = AsyncIOMotorClient(
+        mongo_url,
+        serverSelectionTimeoutMS=1500,
+        connectTimeoutMS=1500,
+        socketTimeoutMS=1500,
+    )
     db = client[db_name]
 else:
     logger.warning("MONGO_URL not set. Starting without database connection.")
@@ -50,6 +55,8 @@ DEFAULT_GOLD_24K_PER_GRAM = 6500.0
 DEFAULT_SILVER_PER_GRAM = 82.0
 OZ_TO_GRAMS = 31.1035
 RATES_CACHE_FILE = ROOT_DIR / "rates_cache.json"
+PERSISTED_RATES_MAX_AGE_SECONDS = 48 * 60 * 60
+BACKGROUND_RATES_REFRESH_SECONDS = 30 * 60
 
 # Pydantic Models
 class AssetInputs(BaseModel):
@@ -90,6 +97,14 @@ class NisabThresholds(BaseModel):
     silver_value_inr: float
     currency: str = "INR"
 
+
+class RatesStatusResponse(BaseModel):
+    has_cached_rates: bool
+    cache_timestamp: datetime | None
+    cache_age_seconds: float | None
+    last_error: str | None
+    live_sources: list[str]
+
 class ZakatCalculationResponse(BaseModel):
     total_assets: float
     total_liabilities: float
@@ -104,6 +119,33 @@ class ZakatCalculationResponse(BaseModel):
     asset_breakdown: Dict[str, float]
 
 # Service Functions
+async def _persist_rates_to_db(rates: GoldSilverRates) -> None:
+    """Persist the last good rates into Mongo for durable recovery across restarts."""
+    if db is None:
+        return
+    payload = rates.model_dump(mode="json")
+    await db.rates_cache.update_one(
+        {"_id": "latest_benchmark_rates"},
+        {"$set": payload},
+        upsert=True,
+    )
+
+
+async def _load_rates_from_db() -> GoldSilverRates | None:
+    """Load the last good rates from Mongo if available."""
+    if db is None:
+        return None
+    try:
+        payload = await db.rates_cache.find_one({"_id": "latest_benchmark_rates"})
+        if not payload:
+            return None
+        payload.pop("_id", None)
+        return GoldSilverRates.model_validate(payload)
+    except Exception as exc:
+        logger.warning(f"Unable to load persisted rates from Mongo: {exc}")
+        return None
+
+
 def _persist_rates_to_disk(rates: GoldSilverRates) -> None:
     """Persist the last good rates so cold starts can recover quickly."""
     payload = rates.model_dump(mode="json")
@@ -346,71 +388,99 @@ async def _fetch_rates_from_goldapi_io(http_client: httpx.AsyncClient, now: date
         source="goldapi.io"
     )
 
+
+async def _refresh_rates_cache() -> GoldSilverRates:
+    """Fetch fresh rates from providers and update all cache layers."""
+    now = datetime.now(timezone.utc)
+    async with httpx.AsyncClient(
+        timeout=10.0,
+        headers={"User-Agent": "NoorZakat/1.0 (+https://zakatnoor.netlify.app)"},
+    ) as http_client:
+        retries = 3
+
+        for attempt in range(1, retries + 1):
+            try:
+                provider_errors = []
+                for provider_name, provider in (
+                    ("ibjarates.com", _fetch_rates_from_ibjarates),
+                    ("stooq+fx", _fetch_rates_from_stooq),
+                    ("gold-api.com+open.er-api.com", _fetch_rates_from_gold_api_public),
+                    ("goldapi.io", _fetch_rates_from_goldapi_io),
+                ):
+                    try:
+                        rates = await provider(http_client, now)
+                        rate_cache["data"] = rates
+                        rate_cache["timestamp"] = now
+                        rate_cache["last_error"] = None
+                        await _persist_rates_to_db(rates)
+                        _persist_rates_to_disk(rates)
+                        logger.info(
+                            f"Fetched rates from {provider_name}: Gold 24K = ₹{rates.gold_24k_per_gram}/g"
+                        )
+                        return rates
+                    except Exception as provider_error:
+                        provider_errors.append(f"{provider_name}: {provider_error}")
+                        continue
+
+                raise RuntimeError("; ".join(provider_errors))
+            except Exception as exc:
+                rate_cache["last_error"] = str(exc)
+                if attempt < retries:
+                    await asyncio.sleep(0.5 * attempt)
+                else:
+                    raise
+
+    raise RuntimeError("Unable to refresh rates cache")
+
+
+async def _warm_rates_cache() -> None:
+    """Refresh rates opportunistically in the background without blocking startup."""
+    try:
+        await _refresh_rates_cache()
+    except Exception as exc:
+        logger.warning(f"Background warm-up of rates cache failed: {exc}")
+
+
+async def _refresh_rates_loop() -> None:
+    """Keep refreshing benchmark rates in the background on a slow cadence."""
+    while True:
+        try:
+            await _refresh_rates_cache()
+        except Exception as exc:
+            logger.warning(f"Background rates refresh failed: {exc}")
+        await asyncio.sleep(BACKGROUND_RATES_REFRESH_SECONDS)
+
 async def fetch_gold_silver_rates() -> GoldSilverRates:
     """Fetch live gold and silver rates with caching"""
-    # Check cache
     now = datetime.now(timezone.utc)
+
     if rate_cache["data"] and rate_cache["timestamp"]:
         age = (now - rate_cache["timestamp"]).total_seconds()
         if age < rate_cache["ttl_seconds"]:
             logger.info("Returning cached rates")
             return rate_cache["data"]
 
-    persisted_rates = _load_rates_from_disk()
-    if persisted_rates and not rate_cache["data"]:
+    persisted_rates = await _load_rates_from_db()
+    if not persisted_rates:
+        persisted_rates = _load_rates_from_disk()
+    if persisted_rates:
         rate_cache["data"] = persisted_rates
         rate_cache["timestamp"] = persisted_rates.timestamp
-        logger.info("Loaded persisted benchmark rates from disk")
-    
+        logger.info("Loaded persisted benchmark rates from durable cache")
+        persisted_age = (now - persisted_rates.timestamp).total_seconds()
+        if persisted_age < PERSISTED_RATES_MAX_AGE_SECONDS:
+            logger.info("Returning persisted benchmark rates while background refresh keeps data fresh")
+            return persisted_rates
+
     try:
-        async with httpx.AsyncClient(
-            timeout=10.0,
-            headers={"User-Agent": "NoorZakat/1.0 (+https://zakatnoor.netlify.app)"},
-        ) as http_client:
-            retries = 3
-
-            for attempt in range(1, retries + 1):
-                try:
-                    provider_errors = []
-                    for provider_name, provider in (
-                        ("ibjarates.com", _fetch_rates_from_ibjarates),
-                        ("stooq+fx", _fetch_rates_from_stooq),
-                        ("gold-api.com+open.er-api.com", _fetch_rates_from_gold_api_public),
-                        ("goldapi.io", _fetch_rates_from_goldapi_io),
-                    ):
-                        try:
-                            rates = await provider(http_client, now)
-                            rate_cache["data"] = rates
-                            rate_cache["timestamp"] = now
-                            rate_cache["last_error"] = None
-                            _persist_rates_to_disk(rates)
-                            logger.info(
-                                f"Fetched rates from {provider_name}: Gold 24K = ₹{rates.gold_24k_per_gram}/g"
-                            )
-                            return rates
-                        except Exception as provider_error:
-                            provider_errors.append(f"{provider_name}: {provider_error}")
-                            continue
-
-                    raise RuntimeError("; ".join(provider_errors))
-                except Exception:
-                    if attempt < retries:
-                        # Short exponential backoff for transient network/API failures
-                        await asyncio.sleep(0.5 * attempt)
-                    else:
-                        raise
-    
+        return await _refresh_rates_cache()
     except Exception as e:
         logger.error(f"Error fetching rates: {str(e)}")
         rate_cache["last_error"] = str(e)
-        # If live fetch fails, prefer stale cache over static defaults.
         if rate_cache["data"]:
             stale_age = (now - rate_cache["timestamp"]).total_seconds() if rate_cache["timestamp"] else None
             logger.warning(f"Using stale cached rates. cache_age_seconds={stale_age}")
             return rate_cache["data"]
-        if persisted_rates:
-            logger.warning("Using persisted benchmark rates from disk after provider failure")
-            return persisted_rates
         return _build_rates_from_defaults(now, source="fallback_data(provider_unavailable)")
 
 
@@ -513,6 +583,23 @@ async def get_current_rates():
         logger.error(f"Error in get_current_rates: {str(e)}")
         raise HTTPException(status_code=500, detail="Unable to fetch rates")
 
+
+@api_router.get("/rates/status", response_model=RatesStatusResponse)
+async def get_rates_status():
+    now = datetime.now(timezone.utc)
+    cache_timestamp = rate_cache["timestamp"]
+    cache_age_seconds = None
+    if cache_timestamp:
+        cache_age_seconds = round((now - cache_timestamp).total_seconds(), 2)
+
+    return RatesStatusResponse(
+        has_cached_rates=rate_cache["data"] is not None,
+        cache_timestamp=cache_timestamp,
+        cache_age_seconds=cache_age_seconds,
+        last_error=rate_cache["last_error"],
+        live_sources=sorted(LIVE_RATE_SOURCES),
+    )
+
 @api_router.get("/nisab/thresholds", response_model=NisabThresholds)
 async def get_nisab_thresholds():
     """Get Nisab thresholds in grams and INR value"""
@@ -560,6 +647,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def warm_rates_on_startup():
     asyncio.create_task(_warm_rates_cache())
+    asyncio.create_task(_refresh_rates_loop())
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
